@@ -8,6 +8,12 @@ const GAP_MAX = 100;
 const GAP_START = 62;
 const CATCH_GAP = 0;
 
+// --- BLE treadmill telemetry ---
+const BLE_SERVICE_UUID = "12345678-0000-1000-8000-00805f9b34fb";
+const BLE_CHARACTERISTIC_UUID = "12345678-0001-1000-8000-00805f9b34fb";
+// km/h that counts as "full sprint" for gameplay purposes
+const BLE_MAX_SPEED_KMH = 8;
+
 export default function ChaseRunner() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const phaseRef = useRef<Phase>("idle");
@@ -32,6 +38,17 @@ export default function ChaseRunner() {
   const villainImgRef = useRef<HTMLImageElement | null>(null);
   const imagesReadyRef = useRef(0);
 
+  // --- BLE treadmill state ---
+  const bleDeviceRef = useRef<BluetoothDevice | null>(null);
+  const bleCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
+  const bleVelocityRef = useRef(0); // km/h from treadmill
+  const bleDistanceRef = useRef(0); // meters from treadmill
+  const bleConnectedRef = useRef(false);
+  const [bleConnected, setBleConnected] = useState(false);
+  const [bleStatus, setBleStatus] = useState("Not connected");
+  const [bleSpeed, setBleSpeed] = useState(0);
+  const [bleDistance, setBleDistance] = useState(0);
+
   // Load sprites once
   useEffect(() => {
     const hero = new Image();
@@ -54,6 +71,103 @@ export default function ChaseRunner() {
     setGapDisplay(GAP_START);
     phaseRef.current = "running";
     setPhase("running");
+  }
+
+  // Parse JSON telemetry packets emitted by the ESP32 treadmill firmware
+  function processIncomingTelemetry(event: Event) {
+    const target = event.target as BluetoothRemoteGATTCharacteristic;
+    if (!target.value) return;
+    const decoder = new TextDecoder("utf-8");
+    let raw = decoder.decode(target.value);
+    // Strip stray control bytes so JSON.parse doesn't choke
+    raw = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+
+    try {
+      const packet = JSON.parse(raw);
+      const speed = parseFloat(packet.speed);
+      const distance = parseFloat(packet.distance);
+      if (!Number.isNaN(speed)) {
+        bleVelocityRef.current = speed;
+        setBleSpeed(speed);
+      }
+      if (!Number.isNaN(distance)) {
+        bleDistanceRef.current = distance;
+        setBleDistance(distance);
+      }
+
+      // Real-world running drives the sprint input: any meaningful pace
+      // counts as "holding" the sprint key, proportional to speed.
+      holdingRef.current = speed > 0.5;
+
+      if (phaseRef.current !== "running" && speed > 0.5) {
+        startRun();
+      }
+    } catch (e) {
+      console.warn("BLE telemetry parse error:", raw);
+    }
+  }
+
+  function cleanDisconnectState() {
+    bleConnectedRef.current = false;
+    setBleConnected(false);
+    bleVelocityRef.current = 0;
+    holdingRef.current = false;
+    setBleSpeed(0);
+    setBleStatus((prev) =>
+      prev.startsWith("Failed") ? prev : "Disconnected from treadmill"
+    );
+  }
+
+  async function connectTreadmill() {
+    if (!navigator.bluetooth) {
+      setBleStatus("Web Bluetooth unavailable — use Chrome/Edge over HTTPS or localhost");
+      return;
+    }
+
+    if (bleDeviceRef.current?.gatt?.connected) {
+      bleDeviceRef.current.gatt.disconnect();
+      return;
+    }
+
+    try {
+      setBleStatus("Choose your ESP32 treadmill device...");
+      const device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [BLE_SERVICE_UUID],
+      });
+      bleDeviceRef.current = device;
+
+      setBleStatus("Connecting to GATT server...");
+      const server = await device.gatt!.connect();
+
+      setBleStatus("Looking up treadmill service...");
+      const service = await server.getPrimaryService(BLE_SERVICE_UUID);
+
+      setBleStatus("Subscribing to speed/distance notifications...");
+      const characteristic = await service.getCharacteristic(
+        BLE_CHARACTERISTIC_UUID
+      );
+      bleCharRef.current = characteristic;
+
+      await characteristic.startNotifications();
+      characteristic.addEventListener(
+        "characteristicvaluechanged",
+        processIncomingTelemetry
+      );
+
+      device.addEventListener("gattserverdisconnected", cleanDisconnectState);
+
+      bleConnectedRef.current = true;
+      setBleConnected(true);
+      setBleStatus(`Connected: ${device.name || "ESP32 Treadmill"}`);
+    } catch (error) {
+      console.error(error);
+      setBleStatus(
+        "Connection failed: " +
+          (error instanceof Error ? error.message : String(error))
+      );
+      cleanDisconnectState();
+    }
   }
 
   // Input handling
@@ -235,9 +349,21 @@ export default function ChaseRunner() {
 
       if (phaseNow === "running") {
         difficultyRef.current += dt * 0.012;
+
+        // Throttle is 0..1. With BLE connected it's proportional to real
+        // running speed; otherwise it's a binary hold (space/tap).
+        const throttle = bleConnectedRef.current
+          ? Math.max(0, Math.min(1, bleVelocityRef.current / BLE_MAX_SPEED_KMH))
+          : holdingRef.current
+          ? 1
+          : 0;
+
         const sprintGain = 26 * difficultyRef.current;
         const baseDrain = 16 * difficultyRef.current;
-        const drain = holdingRef.current ? -sprintGain + baseDrain * 0.4 : baseDrain;
+        const drain =
+          throttle > 0
+            ? -sprintGain * throttle + baseDrain * 0.4
+            : baseDrain;
         gapRef.current = Math.max(0, Math.min(GAP_MAX, gapRef.current - drain * dt));
 
         elapsedRef.current += dt;
@@ -245,13 +371,13 @@ export default function ChaseRunner() {
         setScore(scoreRef.current);
         setGapDisplay(gapRef.current);
 
-        const speedFactor = holdingRef.current ? 1.6 : 0.9;
+        const speedFactor = 0.9 + throttle * 0.7;
         groundOffsetRef.current += 260 * speedFactor * dt;
         treeOffsetRef.current += 90 * speedFactor * dt;
         farOffsetRef.current += 30 * speedFactor * dt;
-        runCycleRef.current += dt * (holdingRef.current ? 14 : 8) * difficultyRef.current;
+        runCycleRef.current += dt * (8 + throttle * 6) * difficultyRef.current;
 
-        if (holdingRef.current && Math.random() < 0.6) {
+        if (throttle > 0.15 && Math.random() < 0.6) {
           dustRef.current.push({
             x: w * 0.34 + (Math.random() - 0.5) * 10,
             y: h * 0.72 + 2,
@@ -332,10 +458,29 @@ export default function ChaseRunner() {
       <canvas ref={canvasRef} style={styles.canvas} />
 
       <div style={styles.hud}>
-        <div style={styles.scoreBox}>
-          <span style={styles.scoreLabel}>DISTANCE</span>
-          <span style={styles.scoreValue}>{score}</span>
+        <div style={styles.topRow}>
+          <div style={styles.scoreBox}>
+            <span style={styles.scoreLabel}>DISTANCE</span>
+            <span style={styles.scoreValue}>{score}</span>
+          </div>
+          <button
+            type="button"
+            onClick={connectTreadmill}
+            style={{
+              ...styles.bleButton,
+              ...(bleConnected ? styles.bleButtonConnected : null),
+            }}
+          >
+            <span
+              style={{
+                ...styles.bleDot,
+                ...(bleConnected ? styles.bleDotConnected : null),
+              }}
+            />
+            {bleConnected ? "Treadmill Connected" : "Connect Treadmill"}
+          </button>
         </div>
+
         <div style={styles.gapOuter}>
           <div
             style={{
@@ -347,6 +492,19 @@ export default function ChaseRunner() {
             }}
           />
         </div>
+
+        {bleConnected ? (
+          <div style={styles.telemetryRow}>
+            <span style={styles.telemetryItem}>
+              {bleSpeed.toFixed(1)} km/h
+            </span>
+            <span style={styles.telemetryItem}>
+              {bleDistance.toFixed(1)} m
+            </span>
+          </div>
+        ) : (
+          <div style={styles.bleStatusText}>{bleStatus}</div>
+        )}
       </div>
 
       {phase !== "running" && (
@@ -359,8 +517,16 @@ export default function ChaseRunner() {
                   The goblin is right behind you. Hold to sprint and widen the
                   gap — let go too long and it catches up.
                 </p>
-                <p style={styles.hint}>Hold SPACE or tap and hold the screen to run</p>
-                <p style={styles.hintSmall}>Release fully and the gap closes fast.</p>
+                <p style={styles.hint}>
+                  {bleConnected
+                    ? "Start running on the treadmill to take off"
+                    : "Hold SPACE or tap and hold the screen to run"}
+                </p>
+                <p style={styles.hintSmall}>
+                  {bleConnected
+                    ? "Slow down and the gap closes fast."
+                    : "Release fully and the gap closes fast."}
+                </p>
               </>
             )}
             {phase === "caught" && (
@@ -370,7 +536,11 @@ export default function ChaseRunner() {
                   You made it {score} paces before the goblin grabbed you.
                 </p>
                 <p style={styles.hint}>Best: {best}</p>
-                <p style={styles.hintSmall}>Hold SPACE or tap to try again</p>
+                <p style={styles.hintSmall}>
+                  {bleConnected
+                    ? "Start running again to try again"
+                    : "Hold SPACE or tap to try again"}
+                </p>
               </>
             )}
           </div>
@@ -406,6 +576,12 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 8,
     pointerEvents: "none",
   },
+  topRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
   scoreBox: {
     display: "flex",
     alignItems: "baseline",
@@ -434,6 +610,54 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100%",
     borderRadius: 6,
     transition: "width 0.08s linear",
+  },
+  bleButton: {
+    pointerEvents: "auto",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: 0.4,
+    color: "#fff7e6",
+    background: "rgba(20,20,15,0.55)",
+    border: "1px solid rgba(255,255,255,0.25)",
+    borderRadius: 20,
+    padding: "6px 12px",
+    cursor: "pointer",
+  },
+  bleButtonConnected: {
+    background: "rgba(63,107,58,0.55)",
+    border: "1px solid rgba(127,179,90,0.55)",
+  },
+  bleDot: {
+    width: 7,
+    height: 7,
+    borderRadius: "50%",
+    background: "#e74c3c",
+    boxShadow: "0 0 6px #e74c3c",
+    flexShrink: 0,
+  },
+  bleDotConnected: {
+    background: "#7fb35a",
+    boxShadow: "0 0 6px #7fb35a",
+  },
+  telemetryRow: {
+    display: "flex",
+    gap: 12,
+  },
+  telemetryItem: {
+    fontSize: 11,
+    fontFamily: "monospace",
+    color: "#f2ead8cc",
+    background: "rgba(20,20,15,0.35)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    borderRadius: 6,
+    padding: "2px 8px",
+  },
+  bleStatusText: {
+    fontSize: 11,
+    color: "#f2ead899",
   },
   overlay: {
     position: "absolute",
