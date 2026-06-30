@@ -16,8 +16,8 @@ const BLE_MAX_SPEED_KMH = 8;
 
 export default function ChaseRunner() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const phaseRef = useRef<Phase>("idle");
-  const [phase, setPhase] = useState<Phase>("idle");
+  const phaseRef = useRef<Phase>("running");
+  const [phase, setPhase] = useState<Phase>("running");
   const [score, setScore] = useState(0);
   const [best, setBest] = useState(0);
   const [gapDisplay, setGapDisplay] = useState(GAP_START);
@@ -35,35 +35,39 @@ export default function ChaseRunner() {
   const shakeRef = useRef(0);
   const starTimeRef = useRef(0);
 
-  const heroImgRef = useRef<HTMLImageElement | null>(null);
-  const villainImgRef = useRef<HTMLImageElement | null>(null);
+  const heroNodeRef = useRef<HTMLImageElement | null>(null);
+  const villainNodeRef = useRef<HTMLImageElement | null>(null);
   const bgImgRef = useRef<HTMLImageElement | null>(null);
-  const imagesReadyRef = useRef(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const bloodStainsRef = useRef<{ x: number; y: number; size: number; opacity: number }[]>([]);
 
   // --- BLE treadmill state ---
   const bleDeviceRef = useRef<BluetoothDevice | null>(null);
   const bleCharRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
   const bleVelocityRef = useRef(0); // km/h from treadmill
   const bleDistanceRef = useRef(0); // meters from treadmill
+  const bleDistanceBaseRef = useRef(0); // baseline for the current run
   const bleConnectedRef = useRef(false);
   const [bleConnected, setBleConnected] = useState(false);
   const [bleStatus, setBleStatus] = useState("Not connected");
   const [bleSpeed, setBleSpeed] = useState(0);
   const [bleDistance, setBleDistance] = useState(0);
+  const [lastBleRaw, setLastBleRaw] = useState<string | null>(null);
+  const [lastBleAt, setLastBleAt] = useState<number | null>(null);
 
-  // Load sprites + background once
+  // Load background once
   useEffect(() => {
-    const hero = new Image();
-    const villain = new Image();
     const bg = new Image();
-    hero.src = "/sprites/hero.png";
-    villain.src = "/sprites/villain.png";
     bg.src = "/background.jpeg";
-    hero.onload = () => (imagesReadyRef.current += 1);
-    villain.onload = () => (imagesReadyRef.current += 1);
-    heroImgRef.current = hero;
-    villainImgRef.current = villain;
-    bgImgRef.current = bg;
+    bg.onload = () => {
+      bgImgRef.current = bg;
+    };
+
+    // Load audio
+    const audio = new Audio("/sprites/Music/Game_score.mpeg");
+    audio.loop = true;
+    audio.volume = 0.5;
+    audioRef.current = audio;
   }, []);
 
   function startRun() {
@@ -72,11 +76,24 @@ export default function ChaseRunner() {
     elapsedRef.current = 0;
     difficultyRef.current = 1;
     dustRef.current = [];
+    bloodStainsRef.current = [];
+    bleDistanceBaseRef.current = bleDistanceRef.current;
     setScore(0);
     setGapDisplay(GAP_START);
+    setBleDistance(0);
     phaseRef.current = "running";
     setPhase("running");
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
+    }
   }
+
+  useEffect(() => {
+    if (phaseRef.current !== "running") {
+      startRun();
+    }
+  }, []);
 
   // Parse JSON telemetry packets emitted by the ESP32 treadmill firmware
   function processIncomingTelemetry(event: Event) {
@@ -86,6 +103,14 @@ export default function ChaseRunner() {
     let raw = decoder.decode(target.value);
     // Strip stray control bytes so JSON.parse doesn't choke
     raw = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+
+    // Preserve raw packet for debugging
+    try {
+      setLastBleRaw(raw);
+      setLastBleAt(Date.now());
+    } catch (e) {
+      /* ignore in non-browser or SSR contexts */
+    }
 
     try {
       const packet = JSON.parse(raw);
@@ -97,7 +122,8 @@ export default function ChaseRunner() {
       }
       if (!Number.isNaN(distance)) {
         bleDistanceRef.current = distance;
-        setBleDistance(distance);
+        const displayedDistance = Math.max(0, distance - bleDistanceBaseRef.current);
+        setBleDistance(displayedDistance);
       }
 
       // Real-world running drives the sprint input: any meaningful pace
@@ -118,12 +144,20 @@ export default function ChaseRunner() {
     bleVelocityRef.current = 0;
     holdingRef.current = false;
     setBleSpeed(0);
+    setBleDistance(0);
+    bleDistanceRef.current = 0;
+    bleDistanceBaseRef.current = 0;
     setBleStatus((prev) =>
       prev.startsWith("Failed") ? prev : "Disconnected from treadmill"
     );
   }
 
   async function connectTreadmill() {
+    if (!window.isSecureContext) {
+      setBleStatus("Web Bluetooth needs a secure context. Open this app from localhost or HTTPS in Chrome/Edge.");
+      return;
+    }
+
     if (!navigator.bluetooth) {
       setBleStatus("Web Bluetooth unavailable — use Chrome/Edge over HTTPS or localhost");
       return;
@@ -135,7 +169,20 @@ export default function ChaseRunner() {
     }
 
     try {
-      setBleStatus("Choose your ESP32 treadmill device...");
+      const bluetoothApi = navigator.bluetooth as Bluetooth & {
+        getAvailability?: () => Promise<boolean>;
+      };
+      const available = bluetoothApi.getAvailability
+        ? await bluetoothApi.getAvailability()
+        : true;
+      if (available === false) {
+        setBleStatus("Bluetooth adapter unavailable or blocked. Turn on Bluetooth and allow the site to access it.");
+        return;
+      }
+
+      setBleStatus("Opening device chooser...");
+      console.log("BLE: requesting device chooser (acceptAllDevices)");
+      // Try a permissive chooser first so devices that don't advertise the service still appear
       const device = await navigator.bluetooth.requestDevice({
         acceptAllDevices: true,
         optionalServices: [BLE_SERVICE_UUID],
@@ -161,6 +208,11 @@ export default function ChaseRunner() {
       );
 
       device.addEventListener("gattserverdisconnected", cleanDisconnectState);
+
+      // Reset baseline so displayed distance starts from zero for this connection
+      bleDistanceBaseRef.current = bleDistanceRef.current;
+      setBleDistance(0);
+      console.log("BLE: connected", device.name, "baseline", bleDistanceBaseRef.current);
 
       bleConnectedRef.current = true;
       setBleConnected(true);
@@ -252,39 +304,12 @@ export default function ChaseRunner() {
       }
     }
 
-    function drawFarTrees(w: number, h: number, offset: number) {
-      const baseY = h * 0.62;
-      ctx!.fillStyle = "#1f2c40";
-      const spacing = 90;
-      const count = Math.ceil(w / spacing) + 2;
-      for (let i = -1; i < count; i++) {
-        const x = ((i * spacing - (offset % spacing)) + w) % (w + spacing) - spacing / 2;
-        const radius = 46;
-        ctx!.beginPath();
-        ctx!.ellipse(x, baseY, radius, radius * 0.8, 0, 0, Math.PI * 2);
-        ctx!.fill();
-      }
+    function drawFarShops(w: number, h: number, offset: number) {
+      return;
     }
 
-    function drawMidTrees(w: number, h: number, offset: number) {
-      const baseY = h * 0.66;
-      const spacing = 150;
-      const count = Math.ceil(w / spacing) + 2;
-      for (let i = -1; i < count; i++) {
-        const x = ((i * spacing - (offset % spacing)) + w) % (w + spacing) - spacing / 2;
-        // trunk
-        ctx!.fillStyle = "#15110d";
-        ctx!.fillRect(x - 6, baseY - 10, 12, 60);
-        // canopy
-        ctx!.fillStyle = "#192a22";
-        ctx!.beginPath();
-        ctx!.ellipse(x, baseY - 30, 52, 44, 0, 0, Math.PI * 2);
-        ctx!.fill();
-        ctx!.fillStyle = "#22382c";
-        ctx!.beginPath();
-        ctx!.ellipse(x - 16, baseY - 46, 34, 28, 0, 0, Math.PI * 2);
-        ctx!.fill();
-      }
+    function drawMidShops(w: number, h: number, offset: number) {
+      return;
     }
 
     function drawGround(w: number, h: number, offset: number) {
@@ -442,39 +467,46 @@ export default function ChaseRunner() {
       ctx!.globalAlpha = 1;
     }
 
-    function drawCharacter(
+    function drawActorShadow(x: number, groundY: number, scale: number) {
+      const drawH = 92 * scale;
+      const drawW = drawH * 0.65;
+      ctx!.globalAlpha = 0.28;
+      ctx!.fillStyle = "#1a1a14";
+      ctx!.beginPath();
+      ctx!.ellipse(x, groundY + 2, drawW * 0.32, 7 * scale, 0, 0, Math.PI * 2);
+      ctx!.fill();
+      ctx!.globalAlpha = 1;
+    }
+
+    function drawBloodStains(w: number, h: number) {
+      for (const stain of bloodStainsRef.current) {
+        ctx!.globalAlpha = stain.opacity;
+        ctx!.fillStyle = "#8B0000";
+        ctx!.beginPath();
+        ctx!.ellipse(stain.x, stain.y, stain.size * 0.7, stain.size * 0.5, Math.random() * 0.5, 0, Math.PI * 2);
+        ctx!.fill();
+        ctx!.fillStyle = "#A00000";
+        ctx!.beginPath();
+        ctx!.ellipse(stain.x + stain.size * 0.3, stain.y - stain.size * 0.2, stain.size * 0.4, stain.size * 0.3, 0, 0, Math.PI * 2);
+        ctx!.fill();
+      }
+      ctx!.globalAlpha = 1;
+    }
+
+    function updateSpritePosition(
       img: HTMLImageElement | null,
       x: number,
       groundY: number,
+      drawH: number,
       runPhase: number,
-      scale: number,
-      facingShadow: boolean
+      visible: boolean
     ) {
-      if (!img || !img.complete || img.naturalWidth === 0) return;
-      const aspect = img.naturalWidth / img.naturalHeight;
-      const drawH = 92 * scale;
-      const drawW = drawH * aspect;
-      const bob = Math.sin(runPhase) * 6 * scale;
-      const squash = 1 + Math.sin(runPhase * 2) * 0.03;
-      const y = groundY - drawH + bob;
-
-      // shadow
-      if (facingShadow) {
-        ctx!.globalAlpha = 0.28;
-        ctx!.fillStyle = "#1a1a14";
-        ctx!.beginPath();
-        ctx!.ellipse(x, groundY + 2, drawW * 0.32, 7 * scale, 0, 0, Math.PI * 2);
-        ctx!.fill();
-        ctx!.globalAlpha = 1;
-      }
-
-      ctx!.save();
-      ctx!.translate(x, y + drawH / 2);
-      ctx!.scale(1, squash);
-      ctx!.translate(-x, -(y + drawH / 2));
-      ctx!.imageSmoothingEnabled = false;
-      ctx!.drawImage(img, x - drawW / 2, y, drawW, drawH);
-      ctx!.restore();
+      if (!img) return;
+      const bob = Math.sin(runPhase) * 6;
+      const footOffset = 18;
+      img.style.left = `${x}px`;
+      img.style.top = `${groundY - drawH + footOffset + bob}px`;
+      img.style.visibility = visible ? "visible" : "hidden";
     }
 
     function loop(now: number) {
@@ -537,6 +569,25 @@ export default function ChaseRunner() {
         groundOffsetRef.current += 40 * dt;
         treeOffsetRef.current += 14 * dt;
         shakeRef.current = Math.max(0, shakeRef.current - dt * 1.5);
+        if (audioRef.current) {
+          audioRef.current.pause();
+        }
+        // Add blood stains on caught
+        if (bloodStainsRef.current.length < 8) {
+          for (let i = 0; i < 3; i++) {
+            bloodStainsRef.current.push({
+              x: w * 0.34 + (Math.random() - 0.5) * 200,
+              y: h * 0.3 + Math.random() * 200,
+              size: 30 + Math.random() * 60,
+              opacity: 0.7 + Math.random() * 0.3,
+            });
+          }
+        }
+        // Fade blood over time
+        for (const stain of bloodStainsRef.current) {
+          stain.opacity *= 0.98;
+        }
+        bloodStainsRef.current = bloodStainsRef.current.filter((s) => s.opacity > 0.05);
       } else {
         runCycleRef.current += dt * 4;
         treeOffsetRef.current += 10 * dt;
@@ -550,31 +601,34 @@ export default function ChaseRunner() {
       }
 
       drawSky(w, h);
-      drawFarTrees(w, h, farOffsetRef.current);
-      drawMidTrees(w, h, treeOffsetRef.current);
+      drawFarShops(w, h, farOffsetRef.current);
+      drawMidShops(w, h, treeOffsetRef.current);
       drawGround(w, h, groundOffsetRef.current);
       drawDust(w, h);
+      drawBloodStains(w, h);
 
       const groundY = h * 0.72;
       const heroX = w * 0.34;
       const gapPx = (gapRef.current / GAP_MAX) * w * 0.26 + 26;
       const villainX = phaseRef.current === "caught" ? heroX - 30 : heroX - gapPx;
 
-      drawCharacter(
-        villainImgRef.current,
+      drawActorShadow(villainX, groundY, 0.95);
+      drawActorShadow(heroX, groundY, 1);
+      updateSpritePosition(
+        villainNodeRef.current,
         villainX,
         groundY,
+        92 * 0.95,
         runCycleRef.current + 0.4,
-        0.95,
-        true
+        phaseNow === "running"
       );
-      drawCharacter(
-        heroImgRef.current,
+      updateSpritePosition(
+        heroNodeRef.current,
         heroX,
         groundY,
+        92,
         runCycleRef.current,
-        1,
-        true
+        phaseNow === "running"
       );
 
       ctx!.restore();
@@ -596,6 +650,36 @@ export default function ChaseRunner() {
     <div style={styles.wrap}>
       <canvas ref={canvasRef} style={styles.canvas} />
 
+      <img
+        ref={villainNodeRef}
+        src="/sprites/Asura.gif"
+        alt="Villain"
+        style={styles.sprite}
+      />
+      <img
+        ref={heroNodeRef}
+        src="/sprites/Prince.gif"
+        alt="Hero"
+        style={styles.sprite}
+      />
+
+      {phase === "caught" && (
+        <div style={styles.overlay}>
+          <div style={styles.panel}>
+            <h1 style={styles.title}>Caught!</h1>
+            <p style={styles.copy}>You made it {score} paces before the goblin caught you.</p>
+            <p style={styles.hint}>Best: {best}</p>
+            <button
+              type="button"
+              onClick={() => startRun()}
+              style={styles.restartButton}
+            >
+              RESTART
+            </button>
+          </div>
+        </div>
+      )}
+
       <div style={styles.hud}>
         <div style={styles.topRow}>
           <div style={styles.statGroup}>
@@ -606,14 +690,14 @@ export default function ChaseRunner() {
             <div style={styles.statBox}>
               <span style={styles.statLabel}>SPEED</span>
               <span style={styles.statValue}>
-                {bleSpeed.toFixed(1)}
+                {bleConnected ? bleSpeed.toFixed(1) : "0.0"}
                 <span style={styles.statUnit}> km/h</span>
               </span>
             </div>
             <div style={styles.statBox}>
               <span style={styles.statLabel}>DISTANCE</span>
               <span style={styles.statValue}>
-                {bleDistance.toFixed(1)}
+                {bleConnected ? bleDistance.toFixed(1) : "0.0"}
                 <span style={styles.statUnit}> m</span>
               </span>
             </div>
@@ -636,60 +720,22 @@ export default function ChaseRunner() {
           </button>
         </div>
 
-        <div style={styles.gapOuter}>
-          <div
-            style={{
-              ...styles.gapInner,
-              width: `${gapPct}%`,
-              background: danger
-                ? "linear-gradient(90deg,#c0392b,#e74c3c)"
-                : "linear-gradient(90deg,#3f6b3a,#7fb35a)",
-            }}
-          />
-        </div>
+        {/* gap bar removed per user request */}
 
-        {!bleConnected && <div style={styles.bleStatusText}>{bleStatus}</div>}
+        <div style={styles.bleStatusText}>
+          {bleConnected ? `Live telemetry: ${bleSpeed.toFixed(1)} km/h • ${bleDistance.toFixed(1)} m` : bleStatus}
+        </div>
+        {lastBleRaw && (
+          <div style={{ fontSize: 11, color: "#cfc4a4", marginTop: 6 }}>
+            <div>last pkt: {lastBleRaw.length > 80 ? lastBleRaw.slice(0, 80) + '…' : lastBleRaw}</div>
+            <div style={{ fontSize: 11, color: "#a9a9a9" }}>
+              {lastBleAt ? `at ${new Date(lastBleAt).toLocaleTimeString()}` : null}
+            </div>
+          </div>
+        )}
       </div>
 
-      {phase !== "running" && (
-        <div style={styles.overlay}>
-          <div style={styles.panel}>
-            {phase === "idle" && (
-              <>
-                <h1 style={styles.title}>Seer&apos;s Escape</h1>
-                <p style={styles.copy}>
-                  The goblin is right behind you. Hold to sprint and widen the
-                  gap — let go too long and it catches up.
-                </p>
-                <p style={styles.hint}>
-                  {bleConnected
-                    ? "Start running on the treadmill to take off"
-                    : "Hold SPACE or tap and hold the screen to run"}
-                </p>
-                <p style={styles.hintSmall}>
-                  {bleConnected
-                    ? "Slow down and the gap closes fast."
-                    : "Release fully and the gap closes fast."}
-                </p>
-              </>
-            )}
-            {phase === "caught" && (
-              <>
-                <h1 style={styles.title}>Caught!</h1>
-                <p style={styles.copy}>
-                  You made it {score} paces before the goblin grabbed you.
-                </p>
-                <p style={styles.hint}>Best: {best}</p>
-                <p style={styles.hintSmall}>
-                  {bleConnected
-                    ? "Start running again to try again"
-                    : "Hold SPACE or tap to try again"}
-                </p>
-              </>
-            )}
-          </div>
-        </div>
-      )}
+      {/* landing/caught overlay removed so the game starts immediately */}
     </div>
   );
 }
@@ -718,7 +764,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     gap: 8,
-    pointerEvents: "none",
+    pointerEvents: "auto",
   },
   topRow: {
     display: "flex",
@@ -812,7 +858,23 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "rgba(10,14,10,0.55)",
+    background: "rgba(0,0,0,0.7)",
+    zIndex: 100,
+  },
+  sprite: {
+    position: "absolute",
+    width: "auto",
+    height: "92px",
+    transform: "translateX(-50%)",
+    transformOrigin: "bottom center",
+    pointerEvents: "none",
+    imageRendering: "pixelated",
+    visibility: "hidden",
+    backgroundColor: "transparent",
+    objectFit: "contain",
+    filter: "drop-shadow(0 0 2px rgba(0,0,0,0.5))",
+    WebkitMaskImage: "linear-gradient(#000 0 0)",
+    maskImage: "linear-gradient(#000 0 0)",
   },
   panel: {
     maxWidth: 380,
