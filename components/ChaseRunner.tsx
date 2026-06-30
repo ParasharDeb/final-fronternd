@@ -288,35 +288,148 @@ export default function ChaseRunner() {
     }
 
     function drawGround(w: number, h: number, offset: number) {
-      const groundY = h * 0.72;
-      // grass
-      ctx!.fillStyle = "#1b2c1f";
-      ctx!.fillRect(0, groundY, w, h - groundY);
-      // worn dirt path band
-      const pathY = groundY + (h - groundY) * 0.35;
-      ctx!.fillStyle = "#4a4434";
-      ctx!.fillRect(0, pathY, w, h - pathY);
-      // path texture strokes
-      ctx!.strokeStyle = "rgba(20,18,12,0.5)";
-      ctx!.lineWidth = 3;
-      const spacing = 40;
-      const count = Math.ceil(w / spacing) + 2;
-      for (let i = -1; i < count; i++) {
-        const x = ((i * spacing - (offset % spacing)) + w) % (w + spacing) - spacing / 2;
-        ctx!.beginPath();
-        ctx!.moveTo(x, pathY + 6);
-        ctx!.lineTo(x + 14, h);
-        ctx!.stroke();
-      }
-      // grass tufts
-      ctx!.fillStyle = "#16271a";
-      const tuftSpacing = 26;
-      const tcount = Math.ceil(w / tuftSpacing) + 2;
-      for (let i = -1; i < tcount; i++) {
-        const x = ((i * tuftSpacing - (offset * 1.4 % tuftSpacing)) + w) % (w + tuftSpacing) - tuftSpacing / 2;
-        ctx!.fillRect(x, groundY - 4, 3, 8);
-      }
-    }
+  const groundY = h * 0.72;
+
+  // ---------- Grass gradient ----------
+  const grassGrad = ctx!.createLinearGradient(0, groundY, 0, h);
+  grassGrad.addColorStop(0, "#35552d");
+  grassGrad.addColorStop(0.4, "#294221");
+  grassGrad.addColorStop(1, "#182418");
+
+  ctx!.fillStyle = grassGrad;
+  ctx!.fillRect(0, groundY, w, h - groundY);
+
+  // Dark shadow at horizon
+  const shadowGrad = ctx!.createLinearGradient(
+    0,
+    groundY,
+    0,
+    groundY + 50
+  );
+  shadowGrad.addColorStop(0, "rgba(0,0,0,0.35)");
+  shadowGrad.addColorStop(1, "rgba(0,0,0,0)");
+
+  ctx!.fillStyle = shadowGrad;
+  ctx!.fillRect(0, groundY, w, 60);
+
+  // ---------- Dirt path ----------
+  const pathY = groundY + (h - groundY) * 0.33;
+
+  ctx!.beginPath();
+  ctx!.moveTo(0, pathY);
+
+  ctx!.quadraticCurveTo(
+    w * 0.25,
+    pathY - 8,
+    w * 0.5,
+    pathY + 6
+  );
+
+  ctx!.quadraticCurveTo(
+    w * 0.75,
+    pathY + 18,
+    w,
+    pathY + 5
+  );
+
+  ctx!.lineTo(w, h);
+  ctx!.lineTo(0, h);
+  ctx!.closePath();
+
+  const dirtGrad = ctx!.createLinearGradient(0, pathY, 0, h);
+  dirtGrad.addColorStop(0, "#6a5b43");
+  dirtGrad.addColorStop(0.6, "#4e4432");
+  dirtGrad.addColorStop(1, "#3c3427");
+
+  ctx!.fillStyle = dirtGrad;
+  ctx!.fill();
+
+  // ---------- Moving texture ----------
+  ctx!.strokeStyle = "rgba(30,25,18,0.25)";
+  ctx!.lineWidth = 2;
+
+  const spacing = 34;
+  const count = Math.ceil(w / spacing) + 2;
+
+  for (let i = -1; i < count; i++) {
+    const x =
+      ((i * spacing - (offset % spacing)) + w) %
+        (w + spacing) -
+      spacing / 2;
+
+    ctx!.beginPath();
+    ctx!.moveTo(x, pathY + 4);
+    ctx!.lineTo(x + 18, h);
+    ctx!.stroke();
+  }
+
+  // ---------- Grass blades ----------
+  ctx!.strokeStyle = "#4d7d42";
+  ctx!.lineWidth = 1;
+
+  const bladeSpacing = 8;
+
+  for (let i = -1; i < w / bladeSpacing + 2; i++) {
+    const x =
+      ((i * bladeSpacing - (offset * 1.3 % bladeSpacing)) + w) %
+      (w + bladeSpacing);
+
+    const height = 5 + (i % 4);
+
+    ctx!.beginPath();
+    ctx!.moveTo(x, groundY + 1);
+    ctx!.lineTo(x - 1, groundY - height);
+    ctx!.stroke();
+  }
+
+  // ---------- Small rocks ----------
+  ctx!.fillStyle = "#7c766d";
+
+  const rockSpacing = 120;
+
+  for (let i = -1; i < w / rockSpacing + 2; i++) {
+    const x =
+      ((i * rockSpacing - (offset * 0.6 % rockSpacing)) + w) %
+      (w + rockSpacing);
+
+    const y = pathY + 30 + ((i * 37) % 22);
+
+    ctx!.beginPath();
+    ctx!.ellipse(
+      x,
+      y,
+      5 + (i % 3),
+      3,
+      0,
+      0,
+      Math.PI * 2
+    );
+    ctx!.fill();
+  }
+
+  // ---------- Fallen leaves ----------
+  ctx!.fillStyle = "#a56a1d";
+
+  const leafSpacing = 70;
+
+  for (let i = -1; i < w / leafSpacing + 2; i++) {
+    const x =
+      ((i * leafSpacing - (offset * 0.8 % leafSpacing)) + w) %
+      (w + leafSpacing);
+
+    const y = groundY + 18 + ((i * 23) % 40);
+
+    ctx!.save();
+    ctx!.translate(x, y);
+    ctx!.rotate((i % 5) * 0.4);
+
+    ctx!.beginPath();
+    ctx!.ellipse(0, 0, 3, 1.5, 0, 0, Math.PI * 2);
+    ctx!.fill();
+
+    ctx!.restore();
+  }
+}
 
     function drawDust(w: number, h: number) {
       for (const d of dustRef.current) {
