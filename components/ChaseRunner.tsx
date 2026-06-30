@@ -37,6 +37,7 @@ export default function ChaseRunner() {
 
   const heroImgRef = useRef<HTMLImageElement | null>(null);
   const villainImgRef = useRef<HTMLImageElement | null>(null);
+  const bgImgRef = useRef<HTMLImageElement | null>(null);
   const imagesReadyRef = useRef(0);
 
   // --- BLE treadmill state ---
@@ -50,16 +51,19 @@ export default function ChaseRunner() {
   const [bleSpeed, setBleSpeed] = useState(0);
   const [bleDistance, setBleDistance] = useState(0);
 
-  // Load sprites once
+  // Load sprites + background once
   useEffect(() => {
     const hero = new Image();
     const villain = new Image();
+    const bg = new Image();
     hero.src = "/sprites/hero.png";
     villain.src = "/sprites/villain.png";
+    bg.src = "/background.jpeg";
     hero.onload = () => (imagesReadyRef.current += 1);
     villain.onload = () => (imagesReadyRef.current += 1);
     heroImgRef.current = hero;
     villainImgRef.current = villain;
+    bgImgRef.current = bg;
   }, []);
 
   function startRun() {
@@ -220,51 +224,32 @@ export default function ChaseRunner() {
     window.addEventListener("resize", resize);
 
     function drawSky(w: number, h: number) {
-      const g = ctx!.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, "#0a1128");
-      g.addColorStop(0.55, "#142347");
-      g.addColorStop(1, "#2c3a5e");
-      ctx!.fillStyle = g;
-      ctx!.fillRect(0, 0, w, h);
+      const img = bgImgRef.current;
+      if (img && img.complete && img.naturalWidth > 0) {
+        // Cover-fit the background image into the canvas, cropping
+        // whichever axis overflows so it never stretches/distorts.
+        const imgRatio = img.naturalWidth / img.naturalHeight;
+        const canvasRatio = w / h;
+        let drawW: number, drawH: number, dx: number, dy: number;
 
-      // moon
-      const moonX = w * 0.82;
-      const moonY = h * 0.18;
-      const moonR = 30;
-      ctx!.save();
-      ctx!.globalAlpha = 0.25;
-      ctx!.fillStyle = "#fdf6e3";
-      ctx!.beginPath();
-      ctx!.arc(moonX, moonY, moonR * 1.8, 0, Math.PI * 2);
-      ctx!.fill();
-      ctx!.restore();
-      ctx!.fillStyle = "#fdf6e3";
-      ctx!.beginPath();
-      ctx!.arc(moonX, moonY, moonR, 0, Math.PI * 2);
-      ctx!.fill();
-      ctx!.fillStyle = "#e3dcc0";
-      ctx!.beginPath();
-      ctx!.arc(moonX - 8, moonY - 6, 5, 0, Math.PI * 2);
-      ctx!.fill();
-      ctx!.beginPath();
-      ctx!.arc(moonX + 10, moonY + 9, 3.5, 0, Math.PI * 2);
-      ctx!.fill();
+        if (canvasRatio > imgRatio) {
+          drawW = w;
+          drawH = w / imgRatio;
+          dx = 0;
+          dy = (h - drawH) / 2;
+        } else {
+          drawH = h;
+          drawW = h * imgRatio;
+          dy = 0;
+          dx = (w - drawW) / 2;
+        }
 
-      // stars
-      ctx!.fillStyle = "#fdf6e3";
-      const starCount = 60;
-      for (let i = 0; i < starCount; i++) {
-        // deterministic pseudo-random placement so stars don't jitter each frame
-        const sx = (i * 137.5) % w;
-        const sy = (i * 71.3) % (h * 0.55);
-        const twinkle = 0.4 + Math.abs(Math.sin(i * 12.9898 + starTimeRef.current));
-        ctx!.globalAlpha = Math.min(1, twinkle) * 0.8;
-        const size = (i % 3 === 0) ? 1.6 : 1;
-        ctx!.beginPath();
-        ctx!.arc(sx, sy, size, 0, Math.PI * 2);
-        ctx!.fill();
+        ctx!.drawImage(img, dx, dy, drawW, drawH);
+      } else {
+        // Fallback while the image loads so there's no flash of black.
+        ctx!.fillStyle = "#0a1128";
+        ctx!.fillRect(0, 0, w, h);
       }
-      ctx!.globalAlpha = 1;
     }
 
     function drawFarTrees(w: number, h: number, offset: number) {
