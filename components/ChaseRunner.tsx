@@ -33,6 +33,7 @@ export default function ChaseRunner() {
   const treeOffsetRef = useRef(0);
   const farOffsetRef = useRef(0);
   const shakeRef = useRef(0);
+  const starTimeRef = useRef(0);
 
   const heroImgRef = useRef<HTMLImageElement | null>(null);
   const villainImgRef = useRef<HTMLImageElement | null>(null);
@@ -220,16 +221,55 @@ export default function ChaseRunner() {
 
     function drawSky(w: number, h: number) {
       const g = ctx!.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, "#9fd0a8");
-      g.addColorStop(0.55, "#cfe6ac");
-      g.addColorStop(1, "#e9e2b8");
+      g.addColorStop(0, "#0a1128");
+      g.addColorStop(0.55, "#142347");
+      g.addColorStop(1, "#2c3a5e");
       ctx!.fillStyle = g;
       ctx!.fillRect(0, 0, w, h);
+
+      // moon
+      const moonX = w * 0.82;
+      const moonY = h * 0.18;
+      const moonR = 30;
+      ctx!.save();
+      ctx!.globalAlpha = 0.25;
+      ctx!.fillStyle = "#fdf6e3";
+      ctx!.beginPath();
+      ctx!.arc(moonX, moonY, moonR * 1.8, 0, Math.PI * 2);
+      ctx!.fill();
+      ctx!.restore();
+      ctx!.fillStyle = "#fdf6e3";
+      ctx!.beginPath();
+      ctx!.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+      ctx!.fill();
+      ctx!.fillStyle = "#e3dcc0";
+      ctx!.beginPath();
+      ctx!.arc(moonX - 8, moonY - 6, 5, 0, Math.PI * 2);
+      ctx!.fill();
+      ctx!.beginPath();
+      ctx!.arc(moonX + 10, moonY + 9, 3.5, 0, Math.PI * 2);
+      ctx!.fill();
+
+      // stars
+      ctx!.fillStyle = "#fdf6e3";
+      const starCount = 60;
+      for (let i = 0; i < starCount; i++) {
+        // deterministic pseudo-random placement so stars don't jitter each frame
+        const sx = (i * 137.5) % w;
+        const sy = (i * 71.3) % (h * 0.55);
+        const twinkle = 0.4 + Math.abs(Math.sin(i * 12.9898 + starTimeRef.current));
+        ctx!.globalAlpha = Math.min(1, twinkle) * 0.8;
+        const size = (i % 3 === 0) ? 1.6 : 1;
+        ctx!.beginPath();
+        ctx!.arc(sx, sy, size, 0, Math.PI * 2);
+        ctx!.fill();
+      }
+      ctx!.globalAlpha = 1;
     }
 
     function drawFarTrees(w: number, h: number, offset: number) {
       const baseY = h * 0.62;
-      ctx!.fillStyle = "#6f9457";
+      ctx!.fillStyle = "#1f2c40";
       const spacing = 90;
       const count = Math.ceil(w / spacing) + 2;
       for (let i = -1; i < count; i++) {
@@ -248,14 +288,14 @@ export default function ChaseRunner() {
       for (let i = -1; i < count; i++) {
         const x = ((i * spacing - (offset % spacing)) + w) % (w + spacing) - spacing / 2;
         // trunk
-        ctx!.fillStyle = "#4a3526";
+        ctx!.fillStyle = "#15110d";
         ctx!.fillRect(x - 6, baseY - 10, 12, 60);
         // canopy
-        ctx!.fillStyle = "#3f6b3a";
+        ctx!.fillStyle = "#192a22";
         ctx!.beginPath();
         ctx!.ellipse(x, baseY - 30, 52, 44, 0, 0, Math.PI * 2);
         ctx!.fill();
-        ctx!.fillStyle = "#4f7d44";
+        ctx!.fillStyle = "#22382c";
         ctx!.beginPath();
         ctx!.ellipse(x - 16, baseY - 46, 34, 28, 0, 0, Math.PI * 2);
         ctx!.fill();
@@ -265,14 +305,14 @@ export default function ChaseRunner() {
     function drawGround(w: number, h: number, offset: number) {
       const groundY = h * 0.72;
       // grass
-      ctx!.fillStyle = "#5d8a44";
+      ctx!.fillStyle = "#1b2c1f";
       ctx!.fillRect(0, groundY, w, h - groundY);
       // worn dirt path band
       const pathY = groundY + (h - groundY) * 0.35;
-      ctx!.fillStyle = "#b89a6b";
+      ctx!.fillStyle = "#4a4434";
       ctx!.fillRect(0, pathY, w, h - pathY);
       // path texture strokes
-      ctx!.strokeStyle = "rgba(110,84,53,0.5)";
+      ctx!.strokeStyle = "rgba(20,18,12,0.5)";
       ctx!.lineWidth = 3;
       const spacing = 40;
       const count = Math.ceil(w / spacing) + 2;
@@ -284,7 +324,7 @@ export default function ChaseRunner() {
         ctx!.stroke();
       }
       // grass tufts
-      ctx!.fillStyle = "#477234";
+      ctx!.fillStyle = "#16271a";
       const tuftSpacing = 26;
       const tcount = Math.ceil(w / tuftSpacing) + 2;
       for (let i = -1; i < tcount; i++) {
@@ -342,6 +382,7 @@ export default function ChaseRunner() {
     function loop(now: number) {
       const dt = Math.min((now - lastTime) / 1000, 0.05);
       lastTime = now;
+      starTimeRef.current += dt * 1.5;
       const w = canvas!.clientWidth;
       const h = canvas!.clientHeight;
 
@@ -459,9 +500,25 @@ export default function ChaseRunner() {
 
       <div style={styles.hud}>
         <div style={styles.topRow}>
-          <div style={styles.scoreBox}>
-            <span style={styles.scoreLabel}>DISTANCE</span>
-            <span style={styles.scoreValue}>{score}</span>
+          <div style={styles.statGroup}>
+            <div style={styles.statBox}>
+              <span style={styles.statLabel}>SCORE</span>
+              <span style={styles.statValue}>{score}</span>
+            </div>
+            <div style={styles.statBox}>
+              <span style={styles.statLabel}>SPEED</span>
+              <span style={styles.statValue}>
+                {bleSpeed.toFixed(1)}
+                <span style={styles.statUnit}> km/h</span>
+              </span>
+            </div>
+            <div style={styles.statBox}>
+              <span style={styles.statLabel}>DISTANCE</span>
+              <span style={styles.statValue}>
+                {bleDistance.toFixed(1)}
+                <span style={styles.statUnit}> m</span>
+              </span>
+            </div>
           </div>
           <button
             type="button"
@@ -493,18 +550,7 @@ export default function ChaseRunner() {
           />
         </div>
 
-        {bleConnected ? (
-          <div style={styles.telemetryRow}>
-            <span style={styles.telemetryItem}>
-              {bleSpeed.toFixed(1)} km/h
-            </span>
-            <span style={styles.telemetryItem}>
-              {bleDistance.toFixed(1)} m
-            </span>
-          </div>
-        ) : (
-          <div style={styles.bleStatusText}>{bleStatus}</div>
-        )}
+        {!bleConnected && <div style={styles.bleStatusText}>{bleStatus}</div>}
       </div>
 
       {phase !== "running" && (
@@ -578,25 +624,41 @@ const styles: Record<string, React.CSSProperties> = {
   },
   topRow: {
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 10,
+    flexWrap: "wrap",
   },
-  scoreBox: {
+  statGroup: {
     display: "flex",
-    alignItems: "baseline",
-    gap: 8,
+    gap: 10,
   },
-  scoreLabel: {
-    fontSize: 11,
-    letterSpacing: 2,
-    color: "#f2ead8cc",
+  statBox: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    background: "rgba(10,17,40,0.55)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    borderRadius: 10,
+    padding: "6px 12px",
+    minWidth: 64,
   },
-  scoreValue: {
-    fontSize: 26,
+  statLabel: {
+    fontSize: 10,
+    letterSpacing: 1.5,
+    color: "#f2ead8aa",
+  },
+  statValue: {
+    fontSize: 20,
     fontWeight: 700,
+    fontFamily: "monospace",
     color: "#fff7e6",
     textShadow: "0 2px 4px rgba(0,0,0,0.45)",
+  },
+  statUnit: {
+    fontSize: 11,
+    fontWeight: 500,
+    color: "#f2ead8aa",
   },
   gapOuter: {
     width: "min(280px, 60vw)",
@@ -641,19 +703,6 @@ const styles: Record<string, React.CSSProperties> = {
   bleDotConnected: {
     background: "#7fb35a",
     boxShadow: "0 0 6px #7fb35a",
-  },
-  telemetryRow: {
-    display: "flex",
-    gap: 12,
-  },
-  telemetryItem: {
-    fontSize: 11,
-    fontFamily: "monospace",
-    color: "#f2ead8cc",
-    background: "rgba(20,20,15,0.35)",
-    border: "1px solid rgba(255,255,255,0.15)",
-    borderRadius: 6,
-    padding: "2px 8px",
   },
   bleStatusText: {
     fontSize: 11,
